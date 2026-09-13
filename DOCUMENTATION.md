@@ -4,6 +4,8 @@
 
 This document explains the current Node.js and Express backend step by step. It describes what each file does, how a request moves through the application, how the PostgreSQL tables are related, how to run the project, and which parts still need implementation.
 
+For a beginner-friendly, function-by-function explanation of the authentication, product, and admin controllers, see [CONTROLLERS_DOCUMENTATION.md](CONTROLLERS_DOCUMENTATION.md). It includes route connections, middleware flow, database queries, Cloudinary uploads, AI search, response shapes, and current implementation notes.
+
 ## 1. What This Project Uses
 
 - **Node.js**: runs JavaScript on the server.
