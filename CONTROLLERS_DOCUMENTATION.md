@@ -1,10 +1,11 @@
 # Controller Documentation
 
-This guide explains the three main controller files in this project:
+This guide explains the main controller files in this project:
 
 1. `controllers/authController.js`
 2. `controllers/productController.js`
 3. `controllers/adminController.js`
+4. `controllers/orderController.js`
 
 It is written for beginners. A controller is the part of an Express application that receives a request, performs business logic, talks to the database or another service, and sends a response.
 
@@ -30,6 +31,7 @@ Frontend/Postman
 app.use("/api/v1/auth", authRouter);
 app.use("/api/v1/product", productRouter);
 app.use("/api/v1/admin", adminRouter);
+app.use("/api/v1/order", orderRouter);
 ```
 
 The router path and this prefix are combined. For example:
@@ -49,7 +51,7 @@ POST /api/v1/auth/register
 Every controller receives three Express objects:
 
 ```js
-(req, res, next)
+(req, res, next);
 ```
 
 - `req` means request. It contains `req.body`, `req.params`, `req.query`, `req.cookies`, `req.files`, and `req.user`.
@@ -220,9 +222,7 @@ Searches the `users` table for the submitted email. The query is parameterized w
 
 ```js
 if (isAlreadyRegistered.rows.length > 0) {
-  return next(
-    new ErrorHandler("User already registered with this email", 400),
-  );
+  return next(new ErrorHandler("User already registered with this email", 400));
 }
 ```
 
@@ -357,12 +357,10 @@ GET /api/v1/auth/logout
 ```
 
 ```js
-res
-  .status(200)
-  .cookie("token", "", {
-    expires: new Date(Date.now()),
-    httpOnly: true,
-  })
+res.status(200).cookie("token", "", {
+  expires: new Date(Date.now()),
+  httpOnly: true,
+});
 ```
 
 Replaces the token cookie with an empty cookie that expires immediately. The browser removes it. `httpOnly` means browser JavaScript cannot read the cookie.
@@ -400,10 +398,9 @@ const { frontendUrl } = req.query;
 Reads the account email from the body and the frontend base URL from the query string.
 
 ```js
-let userResult = await database.query(
-  "SELECT * FROM users WHERE email = $1",
-  [email],
-);
+let userResult = await database.query("SELECT * FROM users WHERE email = $1", [
+  email,
+]);
 ```
 
 Looks up the account.
@@ -635,14 +632,11 @@ if (req.user?.avatar?.public_id) {
 Deletes the previous Cloudinary image when one exists.
 
 ```js
-const newProfileImage = await cloudinary.uploader.upload(
-  avatar.tempFilePath,
-  {
-    folder: "Ecommerce_Avatars",
-    width: 150,
-    crop: "scale",
-  },
-);
+const newProfileImage = await cloudinary.uploader.upload(avatar.tempFilePath, {
+  folder: "Ecommerce_Avatars",
+  width: 150,
+  crop: "scale",
+});
 ```
 
 Uploads the temporary file created by `fileUpload` to Cloudinary and scales it to width `150`.
@@ -777,8 +771,15 @@ Stores the public URL for the frontend and the public ID for later deletion.
 ```js
 const product = await database.query(
   "INSERT INTO products (...) VALUES (...) RETURNING *",
-  [name, description, price / 122, category, stock,
-   JSON.stringify(uploadedImages), created_by],
+  [
+    name,
+    description,
+    price / 122,
+    category,
+    stock,
+    JSON.stringify(uploadedImages),
+    created_by,
+  ],
 );
 ```
 
@@ -879,9 +880,7 @@ if (ratings) {
 
 ```js
 if (search) {
-  conditions.push(
-    `(p.name ILIKE $${index} OR p.description ILIKE $${index})`,
-  );
+  conditions.push(`(p.name ILIKE $${index} OR p.description ILIKE $${index})`);
   values.push(`%${search}%`);
   index++;
 }
@@ -1253,7 +1252,187 @@ Connected pieces:
 
 ---
 
-# 4. `adminController.js`
+# 4. `orderController.js`
+
+This controller creates orders, retrieves order details, and provides admin order management. The order routes are mounted under `/api/v1/order`.
+
+All order routes use the `token` cookie for authentication. Customer routes use `isAuthenticated`; admin routes use both `isAuthenticated` and `authorizedRoles("Admin")`.
+
+## 4.1 `placeNewOrder`
+
+Route:
+
+```text
+POST /api/v1/order/new
+```
+
+The request must be authenticated. The controller reads these fields from `req.body`:
+
+```json
+{
+  "full_name": "Muhammad Ali",
+  "state": "Punjab",
+  "city": "Lahore",
+  "country": "Pakistan",
+  "address": "123 Main Street",
+  "pincode": "54000",
+  "phone": "+92 300 1234567",
+  "orderedItems": [
+    {
+      "quantity": 2,
+      "product": {
+        "id": "product-uuid",
+        "images": [{ "url": "https://example.com/product.jpg" }]
+      }
+    }
+  ]
+}
+```
+
+`orderedItems` may be an array or a JSON-encoded string. The controller rejects incomplete shipping details with status `400` and rejects an empty cart with status `400`.
+
+For every item, it loads the current product price and stock from PostgreSQL. It rejects an unknown product with `404` and rejects quantities above available stock with `400`. The item price, title, and first image are copied into `order_items`, so the order keeps a snapshot of the product data used at checkout.
+
+The price calculation is:
+
+```text
+tax_price = 0.18
+shipping_price = 0 when subtotal >= 50, otherwise 2
+total_price = round(subtotal + subtotal * tax_price + shipping_price)
+```
+
+The controller then creates records in `orders`, `order_items`, and `shipping_info`, and calls `generatePaymentIntent(orderId, total_price)`.
+
+Successful response:
+
+```json
+{
+  "success": true,
+  "message": "Order placed successfully. Please proceed to payment.",
+  "paymentIntent": "client-secret",
+  "total_price": 100
+}
+```
+
+Payment-intent failure is returned as status `500` with the message `Payment failed. Try again.`
+
+## 4.2 `fetchSingleOrder`
+
+Route:
+
+```text
+GET /api/v1/order/:orderId
+```
+
+Requires authentication. The controller returns one order, its order items, and shipping information:
+
+```json
+{
+  "success": true,
+  "message": "Order fetched.",
+  "orders": {
+    "id": "order-uuid",
+    "order_items": [],
+    "shipping_info": {}
+  }
+}
+```
+
+The `order_items` array contains item IDs, product IDs, quantities, and prices. The query does not currently check that the requested order belongs to `req.user`, and it does not explicitly return a `404` when no order is found. Access control for this endpoint should be reviewed before production use.
+
+## 4.3 `fetchMyOrders`
+
+Route:
+
+```text
+GET /api/v1/order/orders/me
+```
+
+Requires authentication. The controller filters by `req.user.id` and returns all orders belonging to the signed-in user. Each order includes `order_items` with image and title snapshots, plus a `shipping_info` object.
+
+Successful response:
+
+```json
+{
+  "success": true,
+  "message": "All your orders are fetched.",
+  "myOrders": []
+}
+```
+
+The current query includes unpaid orders because the `paid_at IS NOT NULL` condition is commented out in the controller.
+
+## 4.4 `fetchAllOrders`
+
+Route:
+
+```text
+GET /api/v1/order/admin/getall
+```
+
+Requires an authenticated admin account. It returns every order with its nested order items and shipping information:
+
+```json
+{
+  "success": true,
+  "message": "All orders fetched.",
+  "orders": []
+}
+```
+
+The current query also includes unpaid orders because its `paid_at IS NOT NULL` condition is commented out.
+
+## 4.5 `updateOrderStatus`
+
+Route:
+
+```text
+PUT /api/v1/order/admin/update/:orderId
+```
+
+Requires an authenticated admin account. Send the new status in the request body:
+
+```json
+{
+  "status": "Shipped"
+}
+```
+
+The controller first checks that the order exists. It returns `400` when `status` is missing, `404` for an unknown order ID, and otherwise updates `orders.order_status`.
+
+Successful response:
+
+```json
+{
+  "success": true,
+  "message": "Order status updated.",
+  "updatedOrder": {}
+}
+```
+
+The database defines these normal statuses: `Processing`, `Shipped`, `Delivered`, and `Cancelled`. The controller currently checks only that a status value was supplied; database validation is responsible for rejecting unsupported values.
+
+## 4.6 `deleteOrder`
+
+Route:
+
+```text
+DELETE /api/v1/order/admin/delete/:orderId
+```
+
+Requires an authenticated admin account. The controller deletes the order by ID and returns the deleted order:
+
+```json
+{
+  "success": true,
+  "message": "Order deleted.",
+  "order": {}
+}
+```
+
+It returns `404` with `Invalid order ID.` when no order matches. Foreign-key cascade rules determine whether related order items, shipping information, and payment data are deleted with the order.
+
+# 5. `adminController.js`
 
 This controller provides admin-only user management and dashboard statistics.
 
@@ -1406,11 +1585,7 @@ Creates yesterday's date without changing the `today` object.
 
 ```js
 const currentMonthStart = new Date(today.getFullYear(), today.getMonth(), 1);
-const currentMonthEnd = new Date(
-  today.getFullYear(),
-  today.getMonth() + 1,
-  0,
-);
+const currentMonthEnd = new Date(today.getFullYear(), today.getMonth() + 1, 0);
 ```
 
 Creates the first and last day of the current month.
@@ -1532,7 +1707,7 @@ let revenueGrowth = "0%";
 When the previous month has revenue, it calculates:
 
 ```js
-((currentMonthSales - lastMonthRevenue) / lastMonthRevenue) * 100
+((currentMonthSales - lastMonthRevenue) / lastMonthRevenue) * 100;
 ```
 
 It formats positive growth with `+` and two decimal places, for example `+12.50%`. If last month's revenue is zero, it avoids division by zero and leaves the value at `0%`.
@@ -1567,7 +1742,7 @@ The frontend dashboard can use these fields for cards, charts, order-status summ
 
 ---
 
-# 5. Middleware and Utility Connections
+# 6. Middleware and Utility Connections
 
 ## 5.1 `isAuthenticated`
 
@@ -1613,31 +1788,37 @@ The final error middleware formats the response. This keeps error handling consi
 
 ---
 
-# 6. Endpoint Quick Reference
+# 7. Endpoint Quick Reference
 
-| Method | Endpoint | Controller | Authentication |
-|---|---|---|---|
-| POST | `/api/v1/auth/register` | `register` | Public |
-| POST | `/api/v1/auth/login` | `login` | Public |
-| GET | `/api/v1/auth/me` | `getUser` | Login required |
-| GET | `/api/v1/auth/logout` | `logout` | Login required |
-| POST | `/api/v1/auth/password/forgot` | `forgotPassword` | Public |
-| PUT | `/api/v1/auth/password/reset/:token` | `resetPassword` | Reset token |
-| PUT | `/api/v1/auth/password/update` | `updatePassword` | Login required |
-| PUT | `/api/v1/auth/profile/update` | `updateProfile` | Login required |
-| POST | `/api/v1/product/admin/create` | `createProduct` | Admin |
-| GET | `/api/v1/product` | `fetchAllProducts` | Public |
-| GET | `/api/v1/product/singleProduct/:productId` | `fetchSingleProduct` | Public |
-| PUT | `/api/v1/product/admin/update/:productId` | `updateProduct` | Admin |
-| DELETE | `/api/v1/product/admin/delete/:productId` | `deleteProduct` | Admin |
-| PUT | `/api/v1/product/post-new/review/:productId` | `postProductReview` | Login required |
-| DELETE | `/api/v1/product/delete/review/:productId` | `deleteReview` | Login required |
-| POST | `/api/v1/product/ai-search` | `fetchAIFilteredProducts` | Login required |
-| GET | `/api/v1/admin/getallusers` | `getAllUsers` | Admin |
-| DELETE | `/api/v1/admin/delete/:id` | `deleteUser` | Admin |
-| GET | `/api/v1/admin/fetch/dashboard-stats` | `dashboardStats` | Admin |
+| Method | Endpoint                                     | Controller                | Authentication |
+| ------ | -------------------------------------------- | ------------------------- | -------------- |
+| POST   | `/api/v1/auth/register`                      | `register`                | Public         |
+| POST   | `/api/v1/auth/login`                         | `login`                   | Public         |
+| GET    | `/api/v1/auth/me`                            | `getUser`                 | Login required |
+| GET    | `/api/v1/auth/logout`                        | `logout`                  | Login required |
+| POST   | `/api/v1/auth/password/forgot`               | `forgotPassword`          | Public         |
+| PUT    | `/api/v1/auth/password/reset/:token`         | `resetPassword`           | Reset token    |
+| PUT    | `/api/v1/auth/password/update`               | `updatePassword`          | Login required |
+| PUT    | `/api/v1/auth/profile/update`                | `updateProfile`           | Login required |
+| POST   | `/api/v1/product/admin/create`               | `createProduct`           | Admin          |
+| GET    | `/api/v1/product`                            | `fetchAllProducts`        | Public         |
+| GET    | `/api/v1/product/singleProduct/:productId`   | `fetchSingleProduct`      | Public         |
+| PUT    | `/api/v1/product/admin/update/:productId`    | `updateProduct`           | Admin          |
+| DELETE | `/api/v1/product/admin/delete/:productId`    | `deleteProduct`           | Admin          |
+| PUT    | `/api/v1/product/post-new/review/:productId` | `postProductReview`       | Login required |
+| DELETE | `/api/v1/product/delete/review/:productId`   | `deleteReview`            | Login required |
+| POST   | `/api/v1/product/ai-search`                  | `fetchAIFilteredProducts` | Login required |
+| GET    | `/api/v1/admin/getallusers`                  | `getAllUsers`             | Admin          |
+| DELETE | `/api/v1/admin/delete/:id`                   | `deleteUser`              | Admin          |
+| GET    | `/api/v1/admin/fetch/dashboard-stats`        | `dashboardStats`          | Admin          |
+| POST   | `/api/v1/order/new`                          | `placeNewOrder`           | Login required |
+| GET    | `/api/v1/order/:orderId`                     | `fetchSingleOrder`        | Login required |
+| GET    | `/api/v1/order/orders/me`                    | `fetchMyOrders`           | Login required |
+| GET    | `/api/v1/order/admin/getall`                 | `fetchAllOrders`          | Admin          |
+| PUT    | `/api/v1/order/admin/update/:orderId`        | `updateOrderStatus`       | Admin          |
+| DELETE | `/api/v1/order/admin/delete/:orderId`        | `deleteOrder`             | Admin          |
 
-# 7. Important Current-Code Notes
+# 8. Important Current-Code Notes
 
 These are observations about the current implementation, not changes made by this documentation:
 
@@ -1649,7 +1830,7 @@ These are observations about the current implementation, not changes made by thi
 6. Controllers return full user rows in several places. Check whether sensitive fields should be removed before sending user data to clients.
 7. Admin dashboard date calculations use JavaScript `Date` values and PostgreSQL timestamps. Verify timezone behavior when the application is deployed in a different timezone.
 
-# 8. Beginner Mental Model
+# 9. Beginner Mental Model
 
 When reading a controller, ask these questions in order:
 
